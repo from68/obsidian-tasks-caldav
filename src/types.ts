@@ -106,6 +106,8 @@ export interface CalDAVConfiguration {
 	syncOnlyTasksWithDueDate: boolean;
 	/** How markdown hyperlinks in task descriptions are handled during sync (default: "keep") */
 	hyperlinkSyncMode: HyperlinkSyncMode;
+	/** Whether CalDAV task descriptions (SUMMARY) can overwrite Obsidian task descriptions (default: false) */
+	syncDescriptionFromCalDAV: boolean;
 }
 
 /**

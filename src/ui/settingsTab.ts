@@ -209,6 +209,22 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+
+		// Description update control (006-desc-update-control)
+		new Setting(containerEl)
+			.setName("Update task descriptions from calendar")
+			.setDesc(
+				"When enabled, changes to task titles in your CalDAV app will be applied to Obsidian tasks during sync. " +
+				"When disabled (default), task descriptions only flow from Obsidian to CalDAV."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.syncDescriptionFromCalDAV)
+					.onChange(async (value) => {
+						this.plugin.settings.syncDescriptionFromCalDAV = value;
+						await this.plugin.saveSettings();
+					})
+			);
 	}
 
 	/**

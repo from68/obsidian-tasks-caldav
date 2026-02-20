@@ -27,4 +27,7 @@ export const DEFAULT_SETTINGS: CalDAVConfiguration = {
 
 	// Hyperlink sync settings
 	hyperlinkSyncMode: HyperlinkSyncMode.Keep,
+
+	// Description sync settings
+	syncDescriptionFromCalDAV: false,
 };

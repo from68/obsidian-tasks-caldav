@@ -8,6 +8,8 @@ Auto-generated from all feature plans. Last updated: 2026-01-08
 - TypeScript 5.8.3 with strict mode, targeting Obsidian API ^1.11.4 + Obsidian API, tsdav (^2.0.6) CalDAV client library (004-sync-due-date-only)
 - Plugin data.json (settings + sync mappings), Obsidian vault markdown files (.md) (004-sync-due-date-only)
 - TypeScript 5.8.3 with strict mode, targeting Obsidian API ^1.11.4 + Obsidian API, tsdav (^2.0.6) CalDAV client library — no new dependencies added (005-hyperlink-sync-config)
+- TypeScript 5.8.3 with strict mode + Obsidian API ^1.11.4, tsdav ^2.0.6 — no new dependencies (006-desc-update-control)
+- plugin data.json (settings persisted via existing `saveSettings()` mechanism) (006-desc-update-control)
 
 - TypeScript 5.8.3 with strict mode, targeting Obsidian API (latest) (001-caldav-task-sync)
 
@@ -27,9 +29,9 @@ npm test && npm run lint
 TypeScript 5.8.3 with strict mode, targeting Obsidian API (latest): Follow standard conventions
 
 ## Recent Changes
+- 006-desc-update-control: Added TypeScript 5.8.3 with strict mode + Obsidian API ^1.11.4, tsdav ^2.0.6 — no new dependencies
 - 005-hyperlink-sync-config: Added TypeScript 5.8.3 with strict mode, targeting Obsidian API ^1.11.4 + Obsidian API, tsdav (^2.0.6) CalDAV client library — no new dependencies added
 - 005-hyperlink-sync-config: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
-- 004-sync-due-date-only: Added TypeScript 5.8.3 with strict mode, targeting Obsidian API ^1.11.4 + Obsidian API, tsdav (^2.0.6) CalDAV client library
 
 
 <!-- MANUAL ADDITIONS START -->

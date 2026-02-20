@@ -790,12 +790,19 @@ export class SyncEngine {
 			}
 		}
 
+		// 006-desc-update-control: Only apply CalDAV description when setting is enabled.
+		// When disabled (default), preserve the Obsidian description as authoritative.
+		// When enabled, only adopt a non-empty CalDAV value (FR-005: absent/empty = no-op).
+		const descriptionToApply = this.config.syncDescriptionFromCalDAV
+			? (effectiveDescription || task.description)
+			: task.description;
+
 		// Update task in vault (uses Tasks Plugin API if available)
 		await updateTaskInVault(
 			this.app,
 			this.vault,
 			task,
-			effectiveDescription,
+			descriptionToApply,
 			updatedData.dueDate,
 			updatedData.status
 		);
