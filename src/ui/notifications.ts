@@ -31,10 +31,16 @@ export function showSyncSuccess(message: string | number): void {
  * @param app Optional app instance for modal errors
  * @param isAutoSync Whether this was an automatic sync
  */
+let activeErrorModal: SyncErrorModal | null = null;
+
 export function showSyncError(error: string, details: string[] = [], app?: App, isAutoSync: boolean = false): void {
 	if (isAutoSync && app) {
-		// For automatic sync errors, show modal to be more visible
-		new SyncErrorModal(app, error, details).open();
+		// Don't stack modals — skip if one is already open
+		if (activeErrorModal !== null) {
+			return;
+		}
+		activeErrorModal = new SyncErrorModal(app, error, details);
+		activeErrorModal.open();
 	} else {
 		// For manual sync errors, show notice
 		let errorMsg = `✗ ${error}`;
@@ -83,6 +89,7 @@ class SyncErrorModal extends Modal {
 	}
 
 	onClose() {
+		activeErrorModal = null;
 		const { contentEl } = this;
 		contentEl.empty();
 	}

@@ -28,6 +28,8 @@ export class SyncScheduler {
 	private consecutiveFailures: number = 0;
 	private lastSyncTime: Date | null = null;
 	private lastErrorMessage: string | null = null;
+	private lastErrorNotificationTime: Date | null = null;
+	private readonly ERROR_COOLDOWN_MS = 5 * 60 * 1000;
 
 	constructor(app: App, config: CalDAVConfiguration, syncCallback: SyncCallback) {
 		this.app = app;
@@ -111,6 +113,7 @@ export class SyncScheduler {
 				Logger.info(`Sync recovered after ${this.consecutiveFailures} consecutive failures`);
 				this.consecutiveFailures = 0;
 				this.lastErrorMessage = null;
+				this.lastErrorNotificationTime = null;
 			}
 
 			this.lastSyncTime = new Date();
@@ -127,8 +130,16 @@ export class SyncScheduler {
 
 			Logger.error(`Sync failed (${this.consecutiveFailures} consecutive failures): ${this.lastErrorMessage}`, error);
 
-			// Show error to user
-			showSyncError(this.lastErrorMessage, [], this.app, isAutoSync);
+			// Show error to user (auto-sync: respect cooldown to avoid notification storms)
+			const now = new Date();
+			const cooldownElapsed = !this.lastErrorNotificationTime ||
+				(now.getTime() - this.lastErrorNotificationTime.getTime()) >= this.ERROR_COOLDOWN_MS;
+			if (!isAutoSync || cooldownElapsed) {
+				showSyncError(this.lastErrorMessage, [], this.app, isAutoSync);
+				if (isAutoSync) {
+					this.lastErrorNotificationTime = now;
+				}
+			}
 
 			// Log that retry will happen on next interval
 			if (this.isRunning && isAutoSync) {
