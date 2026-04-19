@@ -1,69 +1,130 @@
-/**
- * Logging utility for sync operations
- * Implements T076: Add detailed logging throughout sync process
- */
+import { App } from "obsidian";
 
-// Global debug flag - can be toggled via settings or environment
 let DEBUG = false;
 
-/**
- * Enable or disable debug logging
- */
+const LOG_FILE_PATH = ".obsidian/plugins/obsidian-tasks-caldev/sync.log";
+const MAX_LINES = 10_000;
+const BUFFER_CAP = 2_000;
+const FLUSH_INTERVAL_MS = 5_000;
+
+class FileLogger {
+	private app: App | null = null;
+	private buffer: string[] = [];
+	private flushTimer: number | null = null;
+	private flushing = false;
+
+	init(app: App): void {
+		this.app = app;
+	}
+
+	append(level: string, message: string, extra?: unknown): void {
+		if (!DEBUG) return;
+		const timestamp = new Date().toISOString();
+		let entry = `[${timestamp}] [${level}] ${message}`;
+		if (extra !== undefined) {
+			entry += ` ${serializeExtra(extra)}`;
+		}
+		this.buffer.push(entry);
+		if (this.buffer.length >= BUFFER_CAP) {
+			void this.flush();
+		} else {
+			this.scheduleFlush();
+		}
+	}
+
+	private scheduleFlush(): void {
+		if (this.flushTimer !== null) return;
+		this.flushTimer = window.setTimeout(() => {
+			this.flushTimer = null;
+			void this.flush();
+		}, FLUSH_INTERVAL_MS);
+	}
+
+	async flush(): Promise<void> {
+		if (!this.app || this.buffer.length === 0 || this.flushing) return;
+		this.flushing = true;
+		const entries = this.buffer.splice(0);
+		try {
+			const adapter = this.app.vault.adapter;
+			let existingLines: string[] = [];
+			try {
+				const content = await adapter.read(LOG_FILE_PATH);
+				existingLines = content.split("\n").filter((l) => l.length > 0);
+			} catch {
+				// File doesn't exist yet — start fresh
+			}
+			const allLines = [...existingLines, ...entries];
+			const trimmed =
+				allLines.length > MAX_LINES
+					? allLines.slice(allLines.length - MAX_LINES)
+					: allLines;
+			await adapter.write(LOG_FILE_PATH, trimmed.join("\n") + "\n");
+		} finally {
+			this.flushing = false;
+		}
+	}
+
+	async shutdown(): Promise<void> {
+		if (this.flushTimer !== null) {
+			window.clearTimeout(this.flushTimer);
+			this.flushTimer = null;
+		}
+		await this.flush();
+	}
+}
+
+function serializeExtra(extra: unknown): string {
+	if (extra instanceof Error) {
+		return extra.stack ?? `${extra.name}: ${extra.message}`;
+	}
+	if (Array.isArray(extra) && extra.length === 0) return "";
+	try {
+		return JSON.stringify(extra);
+	} catch {
+		return String(extra);
+	}
+}
+
+const fileLogger = new FileLogger();
+
+export function initLogger(app: App): void {
+	fileLogger.init(app);
+}
+
+export async function shutdownLogger(): Promise<void> {
+	await fileLogger.shutdown();
+}
+
 export function setDebugMode(enabled: boolean): void {
 	DEBUG = enabled;
 }
 
-/**
- * Centralized logger for sync operations
- * Provides structured logging with different levels
- */
 export class Logger {
-	/**
-	 * Log an informational message
-	 */
 	static info(message: string, ...args: unknown[]): void {
-		if (DEBUG) {
-			console.debug(`[CalDAV Sync] ${message}`, ...args);
-		}
+		fileLogger.append("INFO", message, args.length ? args : undefined);
 	}
 
-	/**
-	 * Log a warning message
-	 */
 	static warn(message: string, ...args: unknown[]): void {
-		console.warn(`[CalDAV Sync] ${message}`, ...args);
+		fileLogger.append("WARN", message, args.length ? args : undefined);
 	}
 
-	/**
-	 * Log an error message
-	 */
 	static error(message: string, error?: unknown): void {
-		if (error) {
+		if (error !== undefined) {
 			console.error(`[CalDAV Sync] ${message}`, error);
 		} else {
 			console.error(`[CalDAV Sync] ${message}`);
 		}
+		fileLogger.append("ERROR", message, error);
 	}
 
-	/**
-	 * Log debug information (only when debug mode is enabled)
-	 */
 	static debug(message: string, ...args: unknown[]): void {
-		if (DEBUG) {
-			console.debug(`[CalDAV Sync DEBUG] ${message}`, ...args);
-		}
+		fileLogger.append("DEBUG", message, args.length ? args : undefined);
 	}
 
-	/**
-	 * Log task processing information
-	 */
 	static taskInfo(blockId: string, message: string): void {
 		Logger.debug(`Task ${blockId}: ${message}`);
 	}
 
-	/**
-	 * Log sync statistics
-	 */
 	static syncStats(stats: {
 		total: number;
 		synced: number;
@@ -71,20 +132,14 @@ export class Logger {
 		errors: number;
 	}): void {
 		Logger.info(
-			`Sync stats: ${stats.synced}/${stats.total} tasks synced, ${stats.filtered} filtered, ${stats.errors} errors`
+			`Sync stats: ${stats.synced}/${stats.total} tasks synced, ${stats.filtered} filtered, ${stats.errors} errors`,
 		);
 	}
 
-	/**
-	 * Log sync start
-	 */
 	static syncStart(): void {
 		Logger.info("Sync started...");
 	}
 
-	/**
-	 * Log sync completion
-	 */
 	static syncComplete(): void {
 		Logger.info("Sync completed.");
 	}

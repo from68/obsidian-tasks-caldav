@@ -559,7 +559,7 @@ export class SyncEngine {
 
 			// Validate block ID before attempting URI generation (T015)
 			if (!task.blockId) {
-				console.warn('Skipping URI generation: task missing block ID');
+				Logger.warn('Skipping URI generation: task missing block ID');
 			} else {
 				// Generate URI and format DESCRIPTION (T016)
 				const uri = buildObsidianURI(vaultName, task.filePath, task.blockId);
@@ -567,7 +567,7 @@ export class SyncEngine {
 			}
 		} catch (error) {
 			// Log warning but continue task creation - graceful degradation (T018)
-			console.warn(`Failed to generate Obsidian URI for task: ${error instanceof Error ? error.message : String(error)}`);
+			Logger.warn(`Failed to generate Obsidian URI for task: ${error instanceof Error ? error.message : String(error)}`);
 		}
 
 		// If no URI was generated but we have extracted links, still populate description

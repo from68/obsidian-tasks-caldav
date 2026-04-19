@@ -5,7 +5,7 @@ import { CalDAVSettingsTab } from "./ui/settingsTab";
 import { SyncScheduler } from "./sync/scheduler";
 import { SyncEngine } from "./sync/engine";
 import { loadMappings, saveMappings } from "./sync/mapping";
-import { setDebugMode, Logger } from "./sync/logger";
+import { setDebugMode, initLogger, shutdownLogger, Logger } from "./sync/logger";
 
 /**
  * Main plugin class for CalDAV Task Synchronization
@@ -27,6 +27,7 @@ export default class CalDAVTaskSyncPlugin extends Plugin {
 
 		// Initialize debug logging mode based on settings
 		setDebugMode(this.settings.enableDebugLogging);
+		initLogger(this.app);
 
 		// Initialize sync engine (Phase 5 - US1: T041)
 		this.syncEngine = new SyncEngine(
@@ -67,7 +68,7 @@ export default class CalDAVTaskSyncPlugin extends Plugin {
 	/**
 	 * Plugin cleanup - called when plugin is unloaded
 	 */
-	onunload() {
+	async onunload() {
 		Logger.info("Unloading CalDAV Task Sync plugin");
 
 		// Stop sync scheduler
@@ -80,6 +81,8 @@ export default class CalDAVTaskSyncPlugin extends Plugin {
 			window.clearInterval(this.syncIntervalId);
 			this.syncIntervalId = null;
 		}
+
+		await shutdownLogger();
 	}
 
 	/**

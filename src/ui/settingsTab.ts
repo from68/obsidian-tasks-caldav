@@ -182,7 +182,7 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Enable debug logging")
 			.setDesc(
-				"show detailed sync logs in browser console (open with F12), disable for minimal output",
+				"Write detailed debug log to sync.log file (does not affect Obsidian console)",
 			)
 			.addToggle((toggle) =>
 				toggle
