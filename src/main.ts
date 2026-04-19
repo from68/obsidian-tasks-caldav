@@ -1,11 +1,28 @@
-import { Plugin, Notice, Editor, MarkdownView, MarkdownFileInfo, Menu } from "obsidian";
+import {
+	Plugin,
+	Notice,
+	Editor,
+	MarkdownView,
+	MarkdownFileInfo,
+	Menu,
+} from "obsidian";
 import { CalDAVConfiguration, PluginData } from "./types";
 import { DEFAULT_SETTINGS } from "./settings";
 import { CalDAVSettingsTab } from "./ui/settingsTab";
 import { SyncScheduler } from "./sync/scheduler";
 import { SyncEngine } from "./sync/engine";
-import { loadMappings, saveMappings, backfillCalendarUrlForLegacyMappings, getMappingByBlockId } from "./sync/mapping";
-import { setDebugMode, Logger } from "./sync/logger";
+import {
+	loadMappings,
+	saveMappings,
+	backfillCalendarUrlForLegacyMappings,
+	getMappingByBlockId,
+} from "./sync/mapping";
+import {
+	setDebugMode,
+	initLogger,
+	shutdownLogger,
+	Logger,
+} from "./sync/logger";
 import { CalDAVClient } from "./caldav/client";
 import { CalendarPickerModal } from "./ui/calendarPickerModal";
 import type { DiscoveredCalendar } from "./types";
@@ -32,6 +49,7 @@ export default class CalDAVTaskSyncPlugin extends Plugin {
 
 		// Initialize debug logging mode based on settings
 		setDebugMode(this.settings.enableDebugLogging);
+		initLogger(this.app);
 
 		// Run migration before starting sync (task 5.3)
 		await this.maybeRunMigration();
@@ -75,7 +93,11 @@ export default class CalDAVTaskSyncPlugin extends Plugin {
 		this.addCommand({
 			id: "move-task-to-calendar",
 			name: "Move task to calendar…",
-			editorCheckCallback: (checking: boolean, editor: Editor, ctx: MarkdownView | MarkdownFileInfo) => {
+			editorCheckCallback: (
+				checking: boolean,
+				editor: Editor,
+				ctx: MarkdownView | MarkdownFileInfo,
+			) => {
 				const view = ctx instanceof MarkdownView ? ctx : null;
 				if (!view) return false;
 				// Only show if discovery has succeeded (task 7.5)
@@ -91,18 +113,30 @@ export default class CalDAVTaskSyncPlugin extends Plugin {
 				if (!mapping) return false;
 
 				if (!checking) {
-					const calendars = Array.from(discoveryCache.values()).map((cal) => ({
-						url: cal.url,
-						displayName: typeof cal.displayName === "string" ? cal.displayName : cal.url,
-						supportsVTODO: true,
-					}));
+					const calendars = Array.from(discoveryCache.values()).map(
+						(cal) => ({
+							url: cal.url,
+							displayName:
+								typeof cal.displayName === "string"
+									? cal.displayName
+									: cal.url,
+							supportsVTODO: true,
+						}),
+					);
 					new CalendarPickerModal(this.app, calendars, (destUrl) => {
 						if (!this.syncEngine) return;
-						void this.syncEngine.moveTask(mapping.blockId, destUrl).then(() => {
-							new Notice(`Task moved to ${calendars.find(c => c.url === destUrl)?.displayName ?? destUrl}`);
-						}).catch((error: unknown) => {
-							new Notice(`Move failed: ${error instanceof Error ? error.message : String(error)}`);
-						});
+						void this.syncEngine
+							.moveTask(mapping.blockId, destUrl)
+							.then(() => {
+								new Notice(
+									`Task moved to ${calendars.find((c) => c.url === destUrl)?.displayName ?? destUrl}`,
+								);
+							})
+							.catch((error: unknown) => {
+								new Notice(
+									`Move failed: ${error instanceof Error ? error.message : String(error)}`,
+								);
+							});
 					}).open();
 				}
 				return true;
@@ -111,45 +145,64 @@ export default class CalDAVTaskSyncPlugin extends Plugin {
 
 		// Context menu entry for move command (task 7.2)
 		this.registerEvent(
-			this.app.workspace.on("editor-menu", (menu: Menu, editor: Editor) => {
-				const discoveryCache = this.syncEngine?.getDiscoveryCache();
-				if (!discoveryCache || discoveryCache.size === 0) return;
+			this.app.workspace.on(
+				"editor-menu",
+				(menu: Menu, editor: Editor) => {
+					const discoveryCache = this.syncEngine?.getDiscoveryCache();
+					if (!discoveryCache || discoveryCache.size === 0) return;
 
-				const cursor = editor.getCursor();
-				const line = editor.getLine(cursor.line);
-				const blockIdMatch = line.match(/\^(task-[a-z0-9]+)/);
-				if (!blockIdMatch) return;
-				const mapping = getMappingByBlockId(blockIdMatch[1]!);
-				if (!mapping) return;
+					const cursor = editor.getCursor();
+					const line = editor.getLine(cursor.line);
+					const blockIdMatch = line.match(/\^(task-[a-z0-9]+)/);
+					if (!blockIdMatch) return;
+					const mapping = getMappingByBlockId(blockIdMatch[1]!);
+					if (!mapping) return;
 
-				menu.addItem((item) =>
-					item
-						.setTitle("Move task to calendar…")
-						.setIcon("arrow-right-circle")
-						.onClick(() => {
-							const calendars = Array.from(discoveryCache.values()).map((cal) => ({
-								url: cal.url,
-								displayName: typeof cal.displayName === "string" ? cal.displayName : cal.url,
-								supportsVTODO: true,
-							}));
-							new CalendarPickerModal(this.app, calendars, (destUrl) => {
-								if (!this.syncEngine) return;
-								void this.syncEngine.moveTask(mapping.blockId, destUrl).then(() => {
-									new Notice(`Task moved to ${calendars.find(c => c.url === destUrl)?.displayName ?? destUrl}`);
-								}).catch((error: unknown) => {
-									new Notice(`Move failed: ${error instanceof Error ? error.message : String(error)}`);
-								});
-							}).open();
-						}),
-				);
-			}),
+					menu.addItem((item) =>
+						item
+							.setTitle("Move task to calendar…")
+							.setIcon("arrow-right-circle")
+							.onClick(() => {
+								const calendars = Array.from(
+									discoveryCache.values(),
+								).map((cal) => ({
+									url: cal.url,
+									displayName:
+										typeof cal.displayName === "string"
+											? cal.displayName
+											: cal.url,
+									supportsVTODO: true,
+								}));
+								new CalendarPickerModal(
+									this.app,
+									calendars,
+									(destUrl) => {
+										if (!this.syncEngine) return;
+										void this.syncEngine
+											.moveTask(mapping.blockId, destUrl)
+											.then(() => {
+												new Notice(
+													`Task moved to ${calendars.find((c) => c.url === destUrl)?.displayName ?? destUrl}`,
+												);
+											})
+											.catch((error: unknown) => {
+												new Notice(
+													`Move failed: ${error instanceof Error ? error.message : String(error)}`,
+												);
+											});
+									},
+								).open();
+							}),
+					);
+				},
+			),
 		);
 	}
 
 	/**
 	 * Plugin cleanup - called when plugin is unloaded
 	 */
-	onunload() {
+	async onunload() {
 		Logger.info("Unloading CalDAV Task Sync plugin");
 
 		// Stop sync scheduler
@@ -162,6 +215,8 @@ export default class CalDAVTaskSyncPlugin extends Plugin {
 			window.clearInterval(this.syncIntervalId);
 			this.syncIntervalId = null;
 		}
+
+		await shutdownLogger();
 	}
 
 	/**
@@ -199,7 +254,9 @@ export default class CalDAVTaskSyncPlugin extends Plugin {
 
 		if (!needsMigration) return;
 
-		Logger.info("Detected legacy calendarPath setting — attempting migration");
+		Logger.info(
+			"Detected legacy calendarPath setting — attempting migration",
+		);
 		await this.migrateCalendarPath();
 	}
 
@@ -221,11 +278,15 @@ export default class CalDAVTaskSyncPlugin extends Plugin {
 			discovered = await client.discoverCalendars();
 		} catch (error) {
 			// (c) Discovery failed — defer migration
-			Logger.warn(`Migration deferred: discovery failed — ${error instanceof Error ? error.message : String(error)}`);
+			Logger.warn(
+				`Migration deferred: discovery failed — ${error instanceof Error ? error.message : String(error)}`,
+			);
 			return;
 		}
 
-		const matches = discovered.filter((cal) => cal.url.includes(legacyPath));
+		const matches = discovered.filter((cal) =>
+			cal.url.includes(legacyPath),
+		);
 
 		if (matches.length === 1) {
 			// (a) Exactly one match — silent migration
@@ -239,15 +300,18 @@ export default class CalDAVTaskSyncPlugin extends Plugin {
 			this.settings.calendarPath = "";
 			backfillCalendarUrlForLegacyMappings(adopted.url);
 			await this.savePluginData();
-			Logger.info(`Migration complete: defaultCalendar set to ${adopted.url}`);
+			Logger.info(
+				`Migration complete: defaultCalendar set to ${adopted.url}`,
+			);
 		} else {
 			// (b) Ambiguous or no match — prompt user
-			const reason = matches.length === 0
-				? `No discovered calendar matches the legacy path "${legacyPath}".`
-				: `Multiple calendars match the legacy path "${legacyPath}": ${matches.map((c) => c.url).join(", ")}.`;
+			const reason =
+				matches.length === 0
+					? `No discovered calendar matches the legacy path "${legacyPath}".`
+					: `Multiple calendars match the legacy path "${legacyPath}": ${matches.map((c) => c.url).join(", ")}.`;
 			new Notice(
 				`CalDAV plugin: ${reason} ` +
-				'Please open Settings → CalDAV and pick a default calendar. Auto-sync has been disabled until you do.',
+					"Please open Settings → CalDAV and pick a default calendar. Auto-sync has been disabled until you do.",
 				0,
 			);
 			this.settings.enableAutoSync = false;

@@ -5,6 +5,7 @@
 
 import { Vault, TFile, App } from "obsidian";
 import { Task, TaskStatus } from "../types";
+import { Logger } from "../sync/logger";
 
 /**
  * Interface for the Obsidian Tasks Plugin API v1
@@ -27,7 +28,7 @@ function getTasksPluginAPI(app: App): TasksPluginAPI | null {
 			return plugin.apiV1 as TasksPluginAPI;
 		}
 	} catch (error) {
-		console.warn('Failed to access Tasks Plugin API:', error);
+		Logger.warn('Failed to access Tasks Plugin API:', error);
 	}
 	return null;
 }
@@ -62,7 +63,7 @@ export async function updateTaskLine(vault: Vault, task: Task, newLine: string):
 		const newContent = lines.join("\n");
 		await vault.modify(file, newContent);
 	} catch (error) {
-		console.error(`Error updating task at ${task.filePath}:${task.lineNumber}:`, error);
+		Logger.error(`Error updating task at ${task.filePath}:${task.lineNumber}:`, error);
 		throw error;
 	}
 }
@@ -161,10 +162,10 @@ export async function updateTaskInVault(
 				task.status = newStatus;
 				task.rawLine = updatedLine;
 
-				console.debug('Updated task status using Tasks Plugin API');
+				Logger.debug('Updated task status using Tasks Plugin API');
 				return;
 			} catch (error) {
-				console.warn('Failed to use Tasks Plugin API, falling back to direct edit:', error);
+				Logger.warn('Failed to use Tasks Plugin API, falling back to direct edit:', error);
 				// Fall through to direct editing
 			}
 		}

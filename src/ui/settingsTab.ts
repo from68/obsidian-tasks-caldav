@@ -139,7 +139,11 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 					if (cal) {
 						this.plugin.settings.defaultCalendar = {
 							url: cal.url,
-							displayName: "displayName" in cal ? cal.displayName : (this.plugin.settings.defaultCalendar?.displayName ?? ""),
+							displayName:
+								"displayName" in cal
+									? cal.displayName
+									: (this.plugin.settings.defaultCalendar
+											?.displayName ?? ""),
 							ctag: "ctag" in cal ? cal.ctag : undefined,
 						};
 						await this.plugin.saveSettings();
@@ -153,11 +157,9 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 			})
 			.addButton((btn) => {
 				discoverBtn = btn;
-				btn
-					.setButtonText("Discover calendars")
-					.onClick(async () => {
-						await this.runDiscovery(dropdown, discoverBtn, statusDesc);
-					});
+				btn.setButtonText("Discover calendars").onClick(async () => {
+					await this.runDiscovery(dropdown, discoverBtn, statusDesc);
+				});
 				return btn;
 			});
 
@@ -176,7 +178,10 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 		if (this.discoveryCache.length === 0) {
 			if (storedDefault) {
 				// has-default + no-cache → show stored display name as single option
-				dropdown.addOption(storedDefault.url, storedDefault.displayName);
+				dropdown.addOption(
+					storedDefault.url,
+					storedDefault.displayName,
+				);
 				dropdown.setValue(storedDefault.url);
 				dropdown.setDisabled(false);
 			} else {
@@ -196,7 +201,10 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 		dropdown.setDisabled(false);
 
 		// Pre-select stored default if it's in the list
-		if (storedDefault && this.discoveryCache.some((c) => c.url === storedDefault.url)) {
+		if (
+			storedDefault &&
+			this.discoveryCache.some((c) => c.url === storedDefault.url)
+		) {
 			dropdown.setValue(storedDefault.url);
 		} else {
 			dropdown.setValue("");
@@ -228,10 +236,10 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 				error instanceof CalDAVAuthError
 					? "Authentication failed — check your username and password."
 					: error instanceof CalDAVNetworkError
-					? "Network error — check your server URL and connection."
-					: error instanceof Error
-					? error.message
-					: "Discovery failed.";
+						? "Network error — check your server URL and connection."
+						: error instanceof Error
+							? error.message
+							: "Discovery failed.";
 			statusEl.setText(`Discovery error: ${msg}`);
 		} finally {
 			this.isDiscovering = false;
@@ -250,7 +258,10 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 		const allMappings = getAllMappings();
 		const staleCalendars = new Set<string>();
 		for (const mapping of allMappings.values()) {
-			if (mapping.calendarUrl && !discoveredUrls.has(mapping.calendarUrl)) {
+			if (
+				mapping.calendarUrl &&
+				!discoveredUrls.has(mapping.calendarUrl)
+			) {
 				staleCalendars.add(mapping.calendarUrl);
 			}
 		}
@@ -258,17 +269,25 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 		if (staleCalendars.size === 0) return;
 
 		const bannerEl = containerEl.createDiv({ cls: "callout mod-warning" });
-		bannerEl.createEl("strong", { text: "⚠️ stale calendar mappings detected" });
+		bannerEl.createEl("strong", {
+			text: "⚠️ stale calendar mappings detected",
+		});
 		bannerEl.createEl("p", {
-			text: `${staleCalendars.size} calendar(s) referenced by your task mappings are not in the current discovery cache: ` +
+			text:
+				`${staleCalendars.size} calendar(s) referenced by your task mappings are not in the current discovery cache: ` +
 				Array.from(staleCalendars).join(", "),
 		});
 
-		const clearBtn = bannerEl.createEl("button", { text: "Clear stale mappings" });
+		const clearBtn = bannerEl.createEl("button", {
+			text: "Clear stale mappings",
+		});
 		clearBtn.addEventListener("click", () => {
 			const current = getAllMappings();
 			for (const [blockId, mapping] of current.entries()) {
-				if (mapping.calendarUrl && !discoveredUrls.has(mapping.calendarUrl)) {
+				if (
+					mapping.calendarUrl &&
+					!discoveredUrls.has(mapping.calendarUrl)
+				) {
 					removeMapping(blockId);
 				}
 			}
@@ -339,7 +358,7 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Enable debug logging")
 			.setDesc(
-				"Show detailed sync logs in browser console (open with F12), disable for minimal output",
+				"Write detailed debug log to sync.log file (does not affect Obsidian console)",
 			)
 			.addToggle((toggle) =>
 				toggle
@@ -354,17 +373,20 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 		// Hyperlink Sync Mode (005-hyperlink-sync-config)
 		new Setting(containerEl)
 			.setName("Hyperlink handling")
-			.setDesc("How markdown hyperlinks [text](url) in task descriptions are handled when syncing to CalDAV")
+			.setDesc(
+				"How markdown hyperlinks [text](url) in task descriptions are handled when syncing to CalDAV",
+			)
 			.addDropdown((dropdown) =>
 				dropdown
-					.addOption(HyperlinkSyncMode.Keep,  "Keep as-is")
-					.addOption(HyperlinkSyncMode.Move,  "Move to notes")
+					.addOption(HyperlinkSyncMode.Keep, "Keep as-is")
+					.addOption(HyperlinkSyncMode.Move, "Move to notes")
 					.addOption(HyperlinkSyncMode.Strip, "Strip hyperlinks")
 					.setValue(this.plugin.settings.hyperlinkSyncMode)
 					.onChange(async (value) => {
-						this.plugin.settings.hyperlinkSyncMode = value as HyperlinkSyncMode;
+						this.plugin.settings.hyperlinkSyncMode =
+							value as HyperlinkSyncMode;
 						await this.plugin.saveSettings();
-					})
+					}),
 			);
 
 		// Description update control (006-desc-update-control)
@@ -372,7 +394,7 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 			.setName("Update task descriptions from calendar")
 			.setDesc(
 				"When enabled, changes to task titles in your CalDAV app will be applied to Obsidian tasks during sync. " +
-				"When disabled (default), task descriptions only flow from Obsidian to CalDAV."
+					"When disabled (default), task descriptions only flow from Obsidian to CalDAV.",
 			)
 			.addToggle((toggle) =>
 				toggle
@@ -380,7 +402,7 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.syncDescriptionFromCalDAV = value;
 						await this.plugin.saveSettings();
-					})
+					}),
 			);
 	}
 
@@ -565,7 +587,8 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 			if (success) {
 				let msg = "✓ Connection successful!";
 				if (!this.plugin.settings.defaultCalendar) {
-					msg += " Remember to click Discover calendars and select a default calendar before syncing.";
+					msg +=
+						" Remember to click Discover calendars and select a default calendar before syncing.";
 				}
 				new Notice(msg, 6000);
 			} else {

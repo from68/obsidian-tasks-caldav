@@ -261,7 +261,7 @@ export function updateVTODOProperties(
 		// T032: If validation fails, log warning but return the result anyway
 		// This allows for graceful degradation if we encounter unexpected formats
 		if (error instanceof Error) {
-			console.warn(`VTODO validation warning: ${error.message}`);
+			Logger.warn(`VTODO validation warning: ${error.message}`);
 		}
 	}
 
