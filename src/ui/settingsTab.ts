@@ -9,15 +9,21 @@ import {
 	Setting,
 	Notice,
 	SecretComponent,
+	DropdownComponent,
+	ButtonComponent,
 } from "obsidian";
 import CalDAVTaskSyncPlugin from "../main";
 import { CalDAVClient } from "../caldav/client";
 import { CalDAVAuthError, CalDAVNetworkError } from "../caldav/errors";
 import { setDebugMode } from "../sync/logger";
-import { HyperlinkSyncMode } from "../types";
+import { HyperlinkSyncMode, DiscoveredCalendar } from "../types";
+import { getAllMappings, removeMapping } from "../sync/mapping";
 
 export class CalDAVSettingsTab extends PluginSettingTab {
 	plugin: CalDAVTaskSyncPlugin;
+	/** In-memory cache of last discovery result — not persisted to data.json */
+	private discoveryCache: DiscoveredCalendar[] = [];
+	private isDiscovering = false;
 
 	constructor(app: App, plugin: CalDAVTaskSyncPlugin) {
 		super(app, plugin);
@@ -39,22 +45,20 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 	}
 
 	/**
-	 * Add connection settings section (US4: T014-T023)
+	 * Add connection settings section
 	 */
 	private addConnectionSection(containerEl: HTMLElement): void {
 		new Setting(containerEl).setName("Connection").setHeading();
 
-		// Info about secure credential storage
 		const infoEl = containerEl.createDiv({ cls: "callout" });
 		infoEl.createEl("strong", { text: "Secure storage" });
 		infoEl.createEl("p", {
-			text: "Your CalDAV password is stored securely in the system keychain using Obsidian's secret storage API for additional security. consider using app-specific passwords if your CalDAV provider supports them.",
+			text: "Your CalDAV password is stored securely in the system keychain using Obsidian's secret storage API for additional security. Consider using app-specific passwords if your CalDAV provider supports them.",
 		});
 
-		// Server URL (T015)
 		new Setting(containerEl)
 			.setName("Server URL")
-			.setDesc("calDAV server URL (must start with https://)")
+			.setDesc("Caldav Server URL (must start with https://)")
 			.addText((text) =>
 				text
 					.setPlaceholder("https://caldav.example.com")
@@ -65,13 +69,12 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 					}),
 			);
 
-		// Username (T016)
 		new Setting(containerEl)
 			.setName("Username")
-			.setDesc("Your caldav username")
+			.setDesc("Your CalDAV username")
 			.addText((text) =>
 				text
-					.setPlaceholder("Enter mail")
+					.setPlaceholder("Enter username or email")
 					.setValue(this.plugin.settings.username)
 					.onChange(async (value) => {
 						this.plugin.settings.username = value;
@@ -79,7 +82,6 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 					}),
 			);
 
-		// Password (T017) - Using SecretStorage API for secure storage
 		new Setting(containerEl)
 			.setName("Password")
 			.setDesc("Select a password from SecretStorage")
@@ -88,30 +90,20 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.password)
 					.onChange((value) => {
 						this.plugin.settings.password = value;
-						this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					}),
 			);
 
-		// Calendar Path (T018)
-		new Setting(containerEl)
-			.setName("Calendar path")
-			.setDesc(
-				"Path to your tasks calendar (e.g., /dav/calendars/user/tasks/)",
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("/dav/calendars/user/tasks/")
-					.setValue(this.plugin.settings.calendarPath)
-					.onChange(async (value) => {
-						this.plugin.settings.calendarPath = value;
-						await this.plugin.saveSettings();
-					}),
-			);
+		// Default calendar row with dropdown + Discover button (tasks 6.2–6.5)
+		this.addDefaultCalendarRow(containerEl);
 
-		// Test Connection Button (T020-T022)
+		// Stale-mappings banner (task 6.7)
+		this.addStaleMappingsBanner(containerEl);
+
+		// Test Connection Button (task 6.6)
 		new Setting(containerEl)
 			.setName("Test connection")
-			.setDesc("verify your CalDAV connection settings")
+			.setDesc("Verify your CalDAV credentials (no calendar required)")
 			.addButton((button) =>
 				button
 					.setButtonText("Test connection")
@@ -120,6 +112,171 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 						await this.testConnection();
 					}),
 			);
+	}
+
+	/**
+	 * Render the Default calendar row: dropdown + Discover button (tasks 6.2–6.5)
+	 */
+	private addDefaultCalendarRow(containerEl: HTMLElement): void {
+		let dropdown: DropdownComponent;
+		let discoverBtn: ButtonComponent;
+		let statusDesc: HTMLElement;
+
+		const setting = new Setting(containerEl)
+			.setName("Default calendar")
+			.setDesc("The calendar where new tasks will be created")
+			.addDropdown((dd) => {
+				dropdown = dd;
+				this.populateDropdown(dd);
+				dd.onChange(async (value) => {
+					if (!value) return;
+					// Find the calendar in cache to get displayName/ctag
+					const cal =
+						this.discoveryCache.find((c) => c.url === value) ??
+						(this.plugin.settings.defaultCalendar?.url === value
+							? this.plugin.settings.defaultCalendar
+							: null);
+					if (cal) {
+						this.plugin.settings.defaultCalendar = {
+							url: cal.url,
+							displayName: "displayName" in cal ? cal.displayName : (this.plugin.settings.defaultCalendar?.displayName ?? ""),
+							ctag: "ctag" in cal ? cal.ctag : undefined,
+						};
+						await this.plugin.saveSettings();
+						// Re-initialize client with new default
+						if (this.plugin.syncEngine) {
+							this.plugin.syncEngine.updateFilter();
+						}
+					}
+				});
+				return dd;
+			})
+			.addButton((btn) => {
+				discoverBtn = btn;
+				btn
+					.setButtonText("Discover calendars")
+					.onClick(async () => {
+						await this.runDiscovery(dropdown, discoverBtn, statusDesc);
+					});
+				return btn;
+			});
+
+		statusDesc = setting.descEl;
+	}
+
+	/**
+	 * Populate the dropdown from discovery cache and stored default (task 6.3 state machine)
+	 */
+	private populateDropdown(dropdown: DropdownComponent): void {
+		// Clear existing options
+		dropdown.selectEl.empty();
+
+		const storedDefault = this.plugin.settings.defaultCalendar;
+
+		if (this.discoveryCache.length === 0) {
+			if (storedDefault) {
+				// has-default + no-cache → show stored display name as single option
+				dropdown.addOption(storedDefault.url, storedDefault.displayName);
+				dropdown.setValue(storedDefault.url);
+				dropdown.setDisabled(false);
+			} else {
+				// no-default + no-cache → disabled placeholder
+				dropdown.addOption("", "Click Discover calendars to load list");
+				dropdown.setValue("");
+				dropdown.setDisabled(true);
+			}
+			return;
+		}
+
+		// has-cache → show all options
+		dropdown.addOption("", "— select a calendar —");
+		for (const cal of this.discoveryCache) {
+			dropdown.addOption(cal.url, cal.displayName);
+		}
+		dropdown.setDisabled(false);
+
+		// Pre-select stored default if it's in the list
+		if (storedDefault && this.discoveryCache.some((c) => c.url === storedDefault.url)) {
+			dropdown.setValue(storedDefault.url);
+		} else {
+			dropdown.setValue("");
+		}
+	}
+
+	/**
+	 * Run calendar discovery and update the dropdown (task 6.4)
+	 */
+	private async runDiscovery(
+		dropdown: DropdownComponent,
+		discoverBtn: ButtonComponent,
+		statusEl: HTMLElement,
+	): Promise<void> {
+		if (this.isDiscovering) return;
+		this.isDiscovering = true;
+		discoverBtn.setButtonText("Discovering…").setDisabled(true);
+		dropdown.setDisabled(true);
+
+		try {
+			const client = new CalDAVClient(this.app, this.plugin.settings);
+			this.discoveryCache = await client.discoverCalendars();
+			this.populateDropdown(dropdown);
+			statusEl.setText(
+				`${this.discoveryCache.length} calendar(s) found. Select one as default.`,
+			);
+		} catch (error) {
+			const msg =
+				error instanceof CalDAVAuthError
+					? "Authentication failed — check your username and password."
+					: error instanceof CalDAVNetworkError
+					? "Network error — check your server URL and connection."
+					: error instanceof Error
+					? error.message
+					: "Discovery failed.";
+			statusEl.setText(`Discovery error: ${msg}`);
+		} finally {
+			this.isDiscovering = false;
+			discoverBtn.setButtonText("Discover calendars").setDisabled(false);
+			dropdown.setDisabled(false);
+		}
+	}
+
+	/**
+	 * Show a banner if any mappings reference a calendar not in the discovery cache (task 6.7)
+	 */
+	private addStaleMappingsBanner(containerEl: HTMLElement): void {
+		const discoveredUrls = new Set(this.discoveryCache.map((c) => c.url));
+		if (this.discoveryCache.length === 0) return;
+
+		const allMappings = getAllMappings();
+		const staleCalendars = new Set<string>();
+		for (const mapping of allMappings.values()) {
+			if (mapping.calendarUrl && !discoveredUrls.has(mapping.calendarUrl)) {
+				staleCalendars.add(mapping.calendarUrl);
+			}
+		}
+
+		if (staleCalendars.size === 0) return;
+
+		const bannerEl = containerEl.createDiv({ cls: "callout mod-warning" });
+		bannerEl.createEl("strong", { text: "⚠️ stale calendar mappings detected" });
+		bannerEl.createEl("p", {
+			text: `${staleCalendars.size} calendar(s) referenced by your task mappings are not in the current discovery cache: ` +
+				Array.from(staleCalendars).join(", "),
+		});
+
+		const clearBtn = bannerEl.createEl("button", { text: "Clear stale mappings" });
+		clearBtn.addEventListener("click", () => {
+			const current = getAllMappings();
+			for (const [blockId, mapping] of current.entries()) {
+				if (mapping.calendarUrl && !discoveredUrls.has(mapping.calendarUrl)) {
+					removeMapping(blockId);
+				}
+			}
+			void this.plugin.saveSettings().then(() => {
+				bannerEl.remove();
+				new Notice("Stale mappings cleared.");
+			});
+		});
 	}
 
 	/**
@@ -182,7 +339,7 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Enable debug logging")
 			.setDesc(
-				"show detailed sync logs in browser console (open with F12), disable for minimal output",
+				"Show detailed sync logs in browser console (open with F12), disable for minimal output",
 			)
 			.addToggle((toggle) =>
 				toggle
@@ -264,7 +421,7 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Excluded folders")
 			.setDesc(
-				"comma-separated list of folders to exclude (must end with /), example: archive/, templates/",
+				"Comma-separated list of folders to exclude (must end with /), example: archive/, templates/",
 			)
 			.addText((text) =>
 				text
@@ -375,17 +532,17 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 	}
 
 	/**
-	 * Test connection to CalDAV server (T020-T022)
+	 * Test connection to CalDAV server.
+	 * Login-only — works even when no default calendar is configured (task 6.6).
 	 */
 	private async testConnection(): Promise<void> {
-		// Validate settings
 		if (!this.plugin.settings.serverUrl) {
 			new Notice("Please enter a server URL");
 			return;
 		}
 
 		if (!this.plugin.settings.serverUrl.startsWith("https://")) {
-			new Notice("server URL must start with https://");
+			new Notice("Server URL must start with https://");
 			return;
 		}
 
@@ -397,7 +554,7 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 			return;
 		}
 
-		const notice = new Notice("Testing connection...", 0);
+		const notice = new Notice("Testing connection…", 0);
 
 		try {
 			const client = new CalDAVClient(this.app, this.plugin.settings);
@@ -406,7 +563,11 @@ export class CalDAVSettingsTab extends PluginSettingTab {
 			notice.hide();
 
 			if (success) {
-				new Notice("✓ connection successful!");
+				let msg = "✓ Connection successful!";
+				if (!this.plugin.settings.defaultCalendar) {
+					msg += " Remember to click Discover calendars and select a default calendar before syncing.";
+				}
+				new Notice(msg, 6000);
 			} else {
 				new Notice("✗ connection failed. Please check your settings.");
 			}

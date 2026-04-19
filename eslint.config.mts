@@ -22,6 +22,17 @@ export default tseslint.config(
 		},
 	},
 	...obsidianmd.configs.recommended,
+	{
+		plugins: {
+			obsidianmd,
+		},
+		rules: {
+			"obsidianmd/ui/sentence-case": ["error", {
+				// Project-specific brands to preserve casing
+				brands: ["CalDAV", "SecretStorage", "calDAV"],
+			}],
+		},
+	},
 	globalIgnores([
 		"node_modules",
 		"dist",

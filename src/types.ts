@@ -63,6 +63,8 @@ export interface SyncMapping {
 	caldavEtag: string;
 	/** Full URL to the VTODO resource on the server */
 	caldavHref: string;
+	/** URL of the calendar that owns this VTODO */
+	calendarUrl: string;
 }
 
 /**
@@ -79,6 +81,17 @@ export enum HyperlinkSyncMode {
 }
 
 /**
+ * A calendar discovered from the CalDAV server during principal/home-set lookup
+ */
+export interface DiscoveredCalendar {
+	url: string;
+	displayName: string;
+	ctag?: string;
+	color?: string;
+	supportsVTODO: boolean;
+}
+
+/**
  * User-provided settings for connecting to the CalDAV server
  * Note: Password is stored separately using Obsidian's SecretStorage API for security
  */
@@ -88,8 +101,10 @@ export interface CalDAVConfiguration {
 	/** Username for authentication */
 	username: string;
 	password: string;
-	/** Path to the calendar on the server */
+	/** @deprecated Use defaultCalendar instead. Legacy path string for migration. */
 	calendarPath: string;
+	/** The default calendar to sync tasks to, populated by calendar discovery */
+	defaultCalendar: { url: string; displayName: string; ctag?: string } | null;
 	/** Automatic sync interval in seconds (default: 60) */
 	syncInterval: number;
 	/** Whether automatic background sync is enabled (default: true) */
@@ -142,6 +157,7 @@ export interface SerializedSyncMapping {
 	lastKnownCalDAVModified: string;
 	caldavEtag: string;
 	caldavHref: string;
+	calendarUrl: string;
 }
 
 /**

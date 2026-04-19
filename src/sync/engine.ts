@@ -12,7 +12,7 @@ import { scanVaultForTasks } from "../vault/scanner";
 import { updateTaskLine } from "../vault/taskWriter";
 import { generateTaskBlockId, embedBlockId } from "../vault/blockRefManager";
 import { taskToVTODO } from "../caldav/vtodo";
-import { hashTaskContent, getMappingByBlockId, setMapping, getAllMappings } from "./mapping";
+import { hashTaskContent, getMappingByBlockId, setMapping, getAllMappings, removeMapping } from "./mapping";
 import {
 	showSyncStart,
 	showSyncSuccess,
@@ -36,6 +36,15 @@ interface SyncStats {
 	successCount: number;
 	errorCount: number;
 	errors: string[];
+	skippedCalendars: string[];
+}
+
+/** A single observation of a VTODO in a specific calendar during a sync cycle */
+interface ObservedTask {
+	calendarUrl: string;
+	href: string;
+	lastModified: Date;
+	task: CalDAVTask;
 }
 
 /**
@@ -93,6 +102,7 @@ export class SyncEngine {
 			successCount: 0,
 			errorCount: 0,
 			errors: [],
+			skippedCalendars: [],
 		};
 
 		try {
@@ -100,7 +110,7 @@ export class SyncEngine {
 			await this.connectToServer();
 
 			// Fetch tasks from both sources
-			const { caldavTasks, obsidianTasks } = await this.fetchAllTasks(isAutoSync);
+			const { caldavTasks, obsidianTasks } = await this.fetchAllTasks(isAutoSync, stats);
 
 			// Process each Obsidian task
 			await this.processObsidianTasks(obsidianTasks, caldavTasks, stats);
@@ -166,51 +176,178 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Fetch tasks from both Obsidian vault and CalDAV server
-	 * Performance optimization: Returns CalDAV tasks as a Map indexed by UID for O(1) lookups
-	 * @param isAutoSync Whether this is an automatic sync (T016, 002-sync-polish)
+	 * Fetch tasks from both Obsidian vault and CalDAV server.
+	 * Fetches from every calendar in the discovery cache (design D4).
+	 * Runs remote-move detection before returning (design D5).
 	 */
-	private async fetchAllTasks(isAutoSync: boolean = false): Promise<{
+	private async fetchAllTasks(isAutoSync: boolean = false, stats: SyncStats): Promise<{
 		caldavTasks: Map<string, CalDAVTask>;
 		obsidianTasks: Task[];
 	}> {
-		// Fetch all VTODOs; age filtering is applied client-side after fetch
-		const caldavTaskArray = await this.client.fetchAllTasks();
-		Logger.info(`Fetched ${caldavTaskArray.length} tasks from CalDAV server`);
+		const discoveryCache = this.client.getDiscoveryCache();
+		const calendarUrls = Array.from(discoveryCache.keys());
 
-		// Client-side age filter for completed tasks
-		const filteredCalDAVTasks = caldavTaskArray.filter((task) =>
-			this.filter.shouldSyncCalDAVTask(task)
-		);
-		if (filteredCalDAVTasks.length < caldavTaskArray.length) {
-			Logger.debug(
-				`Age filter excluded ${caldavTaskArray.length - filteredCalDAVTasks.length} old completed tasks`
+		// If no calendars discovered yet, fall back to defaultCalendar if set
+		const fetchUrls = calendarUrls.length > 0
+			? calendarUrls
+			: (this.config.defaultCalendar ? [this.config.defaultCalendar.url] : []);
+
+		if (fetchUrls.length === 0) {
+			Logger.warn("No calendars available to fetch from");
+			return { caldavTasks: new Map(), obsidianTasks: [] };
+		}
+
+		// Fan-out fetches with bounded concurrency of 4 (design D4)
+		const CONCURRENCY = 4;
+		// uid → observations across all calendars
+		const uidObservations = new Map<string, ObservedTask[]>();
+		// UIDs seen on the server but excluded by the sync filter (e.g. old completed tasks)
+		const filteredOutUids = new Set<string>();
+
+		for (let i = 0; i < fetchUrls.length; i += CONCURRENCY) {
+			const batch = fetchUrls.slice(i, i + CONCURRENCY);
+			const results = await Promise.allSettled(
+				batch.map(async (url) => {
+					const tasks = await this.client.fetchAllTasks(url);
+					return { url, tasks };
+				}),
 			);
+
+			for (const result of results) {
+				if (result.status === "rejected") {
+					const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+					Logger.warn(`Failed to fetch from calendar (skipping): ${reason}`);
+					// Try to extract URL for stats — best-effort
+					continue;
+				}
+				const { url, tasks } = result.value;
+				for (const task of tasks) {
+					if (!this.filter.shouldSyncCalDAVTask(task)) {
+						filteredOutUids.add(task.uid);
+						continue;
+					}
+					const obs: ObservedTask = {
+						calendarUrl: url,
+						href: task.href,
+						lastModified: task.lastModified,
+						task,
+					};
+					const existing = uidObservations.get(task.uid) ?? [];
+					existing.push(obs);
+					uidObservations.set(task.uid, existing);
+				}
+			}
 		}
 
-		// Performance optimization: Index CalDAV tasks by UID for O(1) lookups
-		// This converts O(n²) complexity to O(n) during sync processing
-		const caldavTasks = new Map<string, CalDAVTask>();
-		for (const task of filteredCalDAVTasks) {
-			caldavTasks.set(task.uid, task);
+		// Detect and resolve calendars that were previously seen but are now missing (task 3.3)
+		const allMappings = getAllMappings();
+		const missedUrls = new Set<string>();
+		for (const mapping of allMappings.values()) {
+			if (mapping.calendarUrl && !discoveryCache.has(mapping.calendarUrl) && discoveryCache.size > 0) {
+				missedUrls.add(mapping.calendarUrl);
+			}
 		}
-		Logger.debug(`Indexed ${caldavTasks.size} CalDAV tasks by UID`);
+		for (const url of missedUrls) {
+			Logger.warn(`Calendar no longer in discovery cache: ${url}`);
+			stats.skippedCalendars.push(url);
+		}
+
+		// Remote-move detection (design D5, tasks 3.7–3.10)
+		this.detectRemoteMoves(uidObservations, allMappings);
+
+		// Flatten observations to a UID-keyed map (one task per UID, already deduplicated by detectRemoteMoves)
+		const caldavTasks = new Map<string, CalDAVTask>();
+		for (const [uid, observations] of uidObservations) {
+			// Pick the canonical observation (most recent last-modified wins if multiple)
+			const canonical = observations.reduce((best, obs) =>
+				obs.lastModified > best.lastModified ? obs : best,
+			);
+			caldavTasks.set(uid, canonical.task);
+		}
+		Logger.info(`Fetched ${caldavTasks.size} tasks from ${fetchUrls.length} calendar(s)`);
 
 		// Scan vault for tasks
 		const allTasks = await scanVaultForTasks(this.vault);
 
-		// Apply filters (T018 - pass config and mappings for due date filter)
-		const mappings = getAllMappings();
+		// Apply filters
 		const obsidianTasks = allTasks.filter((task) =>
-			this.filter.shouldSync(task, this.config, mappings)
+			this.filter.shouldSync(task, this.config, allMappings)
 		);
 
-		// Show filter statistics only for manual sync (T016)
 		if (!isAutoSync) {
 			this.showFilterStats(allTasks.length, obsidianTasks.length);
 		}
 
+		// Handle UIDs not found in any calendar (task 3.10).
+		// Cross-reference with vault: if the Obsidian task is no longer active (completed,
+		// deleted, or filtered out of sync scope), silently drop the stale mapping instead
+		// of surfacing a spurious notice to the user.
+		const activeSyncBlockIds = new Set(obsidianTasks.map((t) => t.blockId));
+		let missingUidNoticeShown = false;
+		for (const [blockId, mapping] of allMappings.entries()) {
+			if (!uidObservations.has(mapping.caldavUid)) {
+				if (filteredOutUids.has(mapping.caldavUid) || !activeSyncBlockIds.has(blockId)) {
+					Logger.debug(`UID ${mapping.caldavUid} not found on server but Obsidian task is inactive — removing stale mapping`);
+					removeMapping(blockId);
+					continue;
+				}
+				if (!missingUidNoticeShown) {
+					new Notice(
+						'Some synced tasks were not found in any discovered calendar. ' +
+						'Try clicking "Discover calendars" in settings to refresh the calendar list.',
+						8000,
+					);
+					missingUidNoticeShown = true;
+				}
+				Logger.warn(`UID ${mapping.caldavUid} not found in any discovered calendar — mapping preserved`);
+			}
+		}
+
 		return { caldavTasks, obsidianTasks };
+	}
+
+	/**
+	 * Remote-move detection (design D5).
+	 * Updates mappings in-memory when a UID is observed in a different calendar than recorded.
+	 * Handles duplicate UIDs by picking the most-recently-modified copy.
+	 */
+	private detectRemoteMoves(
+		uidObservations: Map<string, ObservedTask[]>,
+		allMappings: Map<string, SyncMapping>,
+	): void {
+		for (const mapping of allMappings.values()) {
+			const observations = uidObservations.get(mapping.caldavUid);
+			if (!observations || observations.length === 0) continue;
+
+			let canonical: ObservedTask;
+			if (observations.length === 1) {
+				canonical = observations[0]!;
+			} else {
+				// Multiple observations of the same UID — pick the most recently modified
+				canonical = observations.reduce((best, obs) =>
+					obs.lastModified > best.lastModified ? obs : best,
+				);
+				const otherUrls = observations
+					.filter((o) => o.calendarUrl !== canonical.calendarUrl)
+					.map((o) => o.calendarUrl)
+					.join(", ");
+				Logger.warn(
+					`UID ${mapping.caldavUid} found in multiple calendars: ${observations.map(o => o.calendarUrl).join(", ")}. ` +
+					`Using most recently modified copy at ${canonical.calendarUrl}. Duplicates in [${otherUrls}] not auto-deleted.`,
+				);
+			}
+
+			// Detect remote move: observed calendar differs from mapping
+			if (canonical.calendarUrl !== mapping.calendarUrl) {
+				Logger.info(
+					`Remote move detected for UID ${mapping.caldavUid}: ` +
+					`${mapping.calendarUrl} → ${canonical.calendarUrl}`,
+				);
+				mapping.calendarUrl = canonical.calendarUrl;
+				mapping.caldavHref = canonical.href;
+				setMapping(mapping);
+			}
+		}
 	}
 
 	/**
@@ -277,8 +414,10 @@ export class SyncEngine {
 		const caldavTask = caldavTasks.get(mapping.caldavUid);
 
 		if (!caldavTask) {
-			Logger.warn(`CalDAV task not found for UID ${mapping.caldavUid}`);
-			// Skip
+			Logger.warn(`CalDAV task not found for UID ${mapping.caldavUid} — removing stale mapping and re-creating on CalDAV`);
+			removeMapping(task.blockId);
+			await this.handleUntrackedTask(task);
+			stats.successCount++;
 			return;
 		}
 
@@ -486,9 +625,17 @@ export class SyncEngine {
 	 * @param isAutoSync Whether this is an automatic sync (T012, 002-sync-polish)
 	 */
 	private showSyncResults(stats: SyncStats, isAutoSync: boolean = false): void {
+		// Surface skipped-calendar summary when relevant
+		if (stats.skippedCalendars.length > 0) {
+			new Notice(
+				`Sync: ${stats.skippedCalendars.length} calendar(s) could not be reached and were skipped. ` +
+				`Click "Discover calendars" in settings to refresh.`,
+				8000,
+			);
+		}
+
 		if (stats.errorCount === 0) {
 			Logger.info(`Successfully synced ${stats.successCount} tasks`);
-			// Only show success notification for manual sync (T012)
 			if (!isAutoSync) {
 				showSyncSuccess(`Successfully synced ${stats.successCount} tasks`);
 			}
@@ -496,7 +643,6 @@ export class SyncEngine {
 			Logger.warn(
 				`Sync completed with errors: ${stats.successCount} succeeded, ${stats.errorCount} failed`
 			);
-			// Always show errors (both auto and manual sync)
 			showSyncError(
 				`Sync completed with errors: ${stats.successCount} succeeded, ${stats.errorCount} failed`,
 				stats.errors
@@ -575,8 +721,18 @@ export class SyncEngine {
 			description = processed.extractedLinksBlock;
 		}
 
+		// Route new tasks to the default calendar (design D4)
+		const targetCalendarUrl = this.config.defaultCalendar?.url ?? "";
+		if (!targetCalendarUrl) {
+			throw new Error(
+				"Cannot create CalDAV task: no default calendar configured. " +
+				'Please click "Discover calendars" in settings and select a default calendar.',
+			);
+		}
+
 		// Create task on CalDAV server with optional description (T017, T038)
 		const caldavTask = await this.client.createTask(
+			targetCalendarUrl,
 			processed.summary,
 			vtodoData.due,
 			vtodoData.status,
@@ -585,7 +741,7 @@ export class SyncEngine {
 
 		Logger.debug(`Created CalDAV task: ${caldavTask.uid}`);
 
-		// T043: Store sync mapping after successful creation
+		// T043: Store sync mapping after successful creation (task 3.5)
 		const mapping: SyncMapping = {
 			blockId: task.blockId,
 			caldavUid: caldavTask.uid,
@@ -595,6 +751,7 @@ export class SyncEngine {
 			lastKnownCalDAVModified: caldavTask.lastModified,
 			caldavEtag: caldavTask.etag,
 			caldavHref: caldavTask.href,
+			calendarUrl: targetCalendarUrl,
 		};
 
 		setMapping(mapping);
@@ -726,13 +883,15 @@ export class SyncEngine {
 		const caldavHref = mapping.caldavHref;
 
 		// T029-T030: Update task using property preservation pattern
+		// Route write to the calendar recorded on the mapping (design D4)
 		const updatedTask = await this.client.updateTaskWithPreservation(
 			caldavUid,
 			processed.summary,
 			vtodoData.due,
 			vtodoData.status,
 			caldavEtag,
-			caldavHref
+			caldavHref,
+			mapping.calendarUrl || undefined,
 		);
 
 		// T050: Update sync mapping timestamps and hashes after successful update
@@ -822,6 +981,76 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Move a mapped task from its current calendar to a different one (design D7).
+	 * Implements COPY + DELETE. On copy-ok/delete-fail, keeps both copies and warns.
+	 * @param blockId The Obsidian block ID of the task to move
+	 * @param destinationCalendarUrl The URL of the destination calendar
+	 */
+	async moveTask(blockId: string, destinationCalendarUrl: string): Promise<void> {
+		const mapping = getMappingByBlockId(blockId);
+		if (!mapping) {
+			throw new Error(`Cannot move task: no sync mapping found for block ID ${blockId}`);
+		}
+
+		if (!this.client) {
+			throw new Error("Sync engine client not initialized");
+		}
+
+		await this.connectToServer();
+
+		try {
+			// Step 1: Copy VTODO to destination (design D7)
+			const copiedTask = await this.client.copyTaskToCalendar(
+				mapping.caldavHref,
+				mapping.caldavEtag,
+				destinationCalendarUrl,
+			);
+
+			// Step 2: Delete from source
+			try {
+				await this.client.deleteTask(
+					mapping.caldavUid,
+					mapping.caldavEtag,
+					mapping.caldavHref,
+				);
+			} catch {
+				// Copy succeeded but delete failed — warn user, keep mapping at original (task 7.4)
+				const sourceUrl = mapping.calendarUrl;
+				new Notice(
+					`⚠️ Task copy succeeded but could not be deleted from the original calendar. ` +
+					`The task now exists in both "${sourceUrl}" and "${destinationCalendarUrl}". ` +
+					`Please resolve the duplicate manually in your CalDAV client.`,
+					15000,
+				);
+				Logger.warn(
+					`Move task ${blockId}: copy-ok but delete-fail. ` +
+					`Source: ${sourceUrl}, Dest: ${destinationCalendarUrl}`,
+				);
+				return;
+			}
+
+			// Step 3: Update mapping
+			mapping.calendarUrl = destinationCalendarUrl;
+			mapping.caldavHref = copiedTask.href;
+			mapping.caldavEtag = copiedTask.etag;
+			setMapping(mapping);
+			await this.saveData();
+
+			Logger.info(`Moved task ${blockId} to calendar ${destinationCalendarUrl}`);
+		} finally {
+			await this.client.disconnect();
+		}
+	}
+
+	/**
+	 * Returns the discovery cache from the CalDAV client.
+	 * Used by the move-task UI to list available destination calendars.
+	 */
+	getDiscoveryCache(): Map<string, import("tsdav").DAVCalendar> {
+		return this.client.getDiscoveryCache();
+	}
+
+	/**
 	 * Find a CalDAV task by matching description
 	 * Used for reconciliation when mapping is lost
 	 * @param caldavTasks Map of CalDAV tasks indexed by UID
@@ -867,6 +1096,7 @@ export class SyncEngine {
 			lastKnownCalDAVModified: caldavTask.lastModified,
 			caldavEtag: caldavTask.etag,
 			caldavHref: caldavTask.href,
+			calendarUrl: this.config.defaultCalendar?.url ?? "",
 		};
 
 		setMapping(mapping);

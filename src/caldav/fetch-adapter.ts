@@ -132,3 +132,9 @@ export async function obsidianFetch(
 	const response = await requestUrl(requestParams);
 	return new ObsidianResponse(response);
 }
+
+// tsdav's getFetch() prefers globalThis.fetch over its cross-fetch import.
+// This patch runs as a module side-effect during require('cross-fetch') (via the
+// esbuild alias), which happens before tsdav's own getFetch() call — so tsdav
+// ends up binding our adapter instead of Electron's CORS-restricted fetch.
+globalThis.fetch = obsidianFetch;

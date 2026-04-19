@@ -50,7 +50,9 @@ export function loadMappings(serializedMappings: Record<string, SerializedSyncMa
 			lastKnownObsidianModified: new Date(serialized.lastKnownObsidianModified),
 			lastKnownCalDAVModified: new Date(serialized.lastKnownCalDAVModified),
 			caldavEtag: serialized.caldavEtag || '',
-			caldavHref: serialized.caldavHref || ''
+			caldavHref: serialized.caldavHref || '',
+			// default to empty string for legacy records (4.1)
+			calendarUrl: serialized.calendarUrl || '',
 		};
 
 		mappings.set(blockId, mapping);
@@ -73,7 +75,8 @@ export function saveMappings(): Record<string, SerializedSyncMapping> {
 			lastKnownObsidianModified: mapping.lastKnownObsidianModified.toISOString(),
 			lastKnownCalDAVModified: mapping.lastKnownCalDAVModified.toISOString(),
 			caldavEtag: mapping.caldavEtag,
-			caldavHref: mapping.caldavHref
+			caldavHref: mapping.caldavHref,
+			calendarUrl: mapping.calendarUrl,
 		};
 	}
 
@@ -112,3 +115,17 @@ export function removeMapping(blockId: string): void {
 export function getAllMappings(): Map<string, SyncMapping> {
 	return mappings;
 }
+
+/**
+ * Back-fill calendarUrl on every in-memory mapping that is missing it.
+ * Called once during migration from pre-feature data (task 4.3).
+ * @param url The calendar URL to assign to all unmapped entries
+ */
+export function backfillCalendarUrlForLegacyMappings(url: string): void {
+	for (const mapping of mappings.values()) {
+		if (!mapping.calendarUrl) {
+			mapping.calendarUrl = url;
+		}
+	}
+}
+

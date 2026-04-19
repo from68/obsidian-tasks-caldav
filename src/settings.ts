@@ -10,7 +10,9 @@ export const DEFAULT_SETTINGS: CalDAVConfiguration = {
 	serverUrl: "",
 	username: "",
 	password: "",
+	// calendarPath is kept here only to support migration from older data.json files
 	calendarPath: "",
+	defaultCalendar: null,
 
 	// Sync settings
 	syncInterval: 60, // seconds

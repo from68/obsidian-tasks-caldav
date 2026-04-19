@@ -7,7 +7,7 @@
 
 import { App } from "obsidian";
 import { DAVClient, DAVCalendar } from "tsdav";
-import { CalDAVConfiguration, CalDAVTask, VTODOStatus } from "../types";
+import { CalDAVConfiguration, CalDAVTask, DiscoveredCalendar, VTODOStatus } from "../types";
 import {
 	CalDAVError,
 	CalDAVAuthError,
@@ -65,7 +65,8 @@ interface MinimalDAVClient {
  */
 export class CalDAVClient {
 	private client: MinimalDAVClient | null = null;
-	private calendar: DAVCalendar | null = null;
+	/** All discovered calendars, keyed by exact URL */
+	private calendars: Map<string, DAVCalendar> = new Map();
 	private config: CalDAVConfiguration;
 	private app: App;
 
@@ -75,15 +76,84 @@ export class CalDAVClient {
 	}
 
 	/**
-	 * Connect to CalDAV server and initialize client
-	 * Implements T073: Retry logic with exponential backoff
+	 * Resolve a calendar by exact URL, throwing if not found
+	 */
+	private getCalendar(url: string): DAVCalendar {
+		const cal = this.calendars.get(url);
+		if (!cal) {
+			throw new CalDAVError(
+				`Calendar not found in discovery cache: ${url}. Run "Discover calendars" to refresh.`,
+			);
+		}
+		return cal;
+	}
+
+	/**
+	 * Discover all VTODO-supporting calendars on this server.
+	 * Logs in, calls fetchCalendars(), filters client-side by VTODO support
+	 * (includes when `components` is absent — false positive beats false negative).
+	 */
+	async discoverCalendars(): Promise<DiscoveredCalendar[]> {
+		const password = this.app.secretStorage.getSecret(this.config.password);
+		if (!password) {
+			throw new CalDAVAuthError(
+				"Password not found in secure storage. Please configure your CalDAV password in settings.",
+			);
+		}
+
+		const davClient = new DAVClient({
+			serverUrl: this.config.serverUrl,
+			credentials: { username: this.config.username, password },
+			authMethod: "Basic",
+			defaultAccountType: "caldav",
+		});
+
+		try {
+			await davClient.login();
+		} catch (error) {
+			throw this.handleConnectionError(error);
+		}
+
+		const rawCalendars = await (davClient as unknown as MinimalDAVClient).fetchCalendars();
+
+		Logger.debug(`Discovered ${rawCalendars?.length ?? 0} calendars on server`);
+
+		const discovered: DiscoveredCalendar[] = [];
+		for (const cal of rawCalendars ?? []) {
+			const components: string[] | undefined = (cal as unknown as { components?: string[] }).components;
+			const supportsVTODO = !components || components.includes("VTODO");
+			if (!supportsVTODO) continue;
+
+			const displayName =
+				typeof cal.displayName === "string" && cal.displayName
+					? cal.displayName
+					: cal.url.split("/").filter(Boolean).pop() ?? cal.url;
+			const ctag = (cal as unknown as { ctag?: string }).ctag;
+			const color = (cal as unknown as { calendarColor?: string }).calendarColor;
+
+			discovered.push({
+				url: cal.url,
+				displayName,
+				ctag,
+				color,
+				supportsVTODO: true,
+			});
+		}
+
+		Logger.debug(`Filtered to ${discovered.length} VTODO-supporting calendars`);
+		return discovered;
+	}
+
+	/**
+	 * Connect to CalDAV server and populate calendar map.
+	 * Selects the default calendar by exact URL equality against settings.defaultCalendar.url.
+	 * Fails fast if the default calendar URL doesn't match any discovered calendar.
 	 */
 	async connect(): Promise<void> {
 		return withRetry(async () => {
 			try {
 				Logger.debug("Connecting to CalDAV server...");
 
-				// Retrieve password from SecretStorage
 				const password = this.app.secretStorage.getSecret(
 					this.config.password,
 				);
@@ -93,62 +163,59 @@ export class CalDAVClient {
 					);
 				}
 
-				// Create DAVClient
 				const davClient = new DAVClient({
 					serverUrl: this.config.serverUrl,
 					credentials: {
 						username: this.config.username,
-						password: password,
+						password,
 					},
 					authMethod: "Basic",
 					defaultAccountType: "caldav",
 				});
 
-				// Login to establish auth
 				await davClient.login();
-
 				this.client = davClient as unknown as MinimalDAVClient;
 
-				// Find the calendar by path
-				const calendars = await this.client.fetchCalendars();
+				const rawCalendars = await this.client.fetchCalendars();
+				Logger.debug(`Found ${rawCalendars?.length ?? 0} calendars on server`);
 
-				Logger.debug(
-					`Found ${calendars?.length ?? 0} calendars on server`,
-				);
-
-				// Try to match by calendar path or use first available calendar
-				if (this.config.calendarPath && calendars) {
-					this.calendar =
-						calendars.find((cal) =>
-							cal.url.includes(this.config.calendarPath),
-						) ??
-						calendars[0] ??
-						null;
-
-					Logger.debug(
-						`Selected calendar by path "${this.config.calendarPath}": ${this.calendar?.url}`,
-					);
-				} else if (calendars) {
-					this.calendar = calendars[0] ?? null;
-					Logger.debug(
-						`Selected first available calendar: ${this.calendar?.url}`,
-					);
+				this.calendars = new Map();
+				for (const cal of rawCalendars ?? []) {
+					this.calendars.set(cal.url, cal);
 				}
 
-				if (!this.calendar) {
-					throw new CalDAVError("No calendar found on server");
+				if (!this.config.defaultCalendar) {
+					// No default configured — connect succeeds (login-only) but
+					// calendar-level ops will fail until user picks one in settings.
+					Logger.info("Connected to CalDAV server (no default calendar configured)");
+					return;
+				}
+
+				// Resolve default calendar by exact URL equality (design D2)
+				if (!this.calendars.has(this.config.defaultCalendar.url)) {
+					throw new CalDAVError(
+						`Default calendar not found on server: ${this.config.defaultCalendar.url}. ` +
+							'Please run "Discover calendars" in settings to refresh.',
+					);
 				}
 
 				const displayName =
-					typeof this.calendar.displayName === "string"
-						? this.calendar.displayName
-						: this.calendar.url;
+					typeof this.config.defaultCalendar.displayName === "string"
+						? this.config.defaultCalendar.displayName
+						: this.config.defaultCalendar.url;
 				Logger.info(`Connected to CalDAV calendar: ${displayName}`);
 			} catch (error) {
-				// Transform error into appropriate CalDAV error type
 				throw this.handleConnectionError(error);
 			}
 		});
+	}
+
+	/**
+	 * Returns the in-memory calendar discovery cache (URL → DAVCalendar).
+	 * Used by the sync engine to build the per-cycle fetch set.
+	 */
+	getDiscoveryCache(): Map<string, DAVCalendar> {
+		return this.calendars;
 	}
 
 	/**
@@ -163,8 +230,13 @@ export class CalDAVClient {
 		if (error instanceof Error) {
 			const message = error.message;
 
-			// Check for authentication errors
-			if (message.includes("401") || message.includes("Unauthorized")) {
+			// Check for authentication errors (including discovery-specific PROPFIND 401/403)
+			if (
+				message.includes("401") ||
+				message.includes("403") ||
+				message.includes("Unauthorized") ||
+				message.includes("Forbidden")
+			) {
 				return new CalDAVAuthError(
 					"Authentication failed. Please check your credentials.",
 				);
@@ -221,7 +293,7 @@ export class CalDAVClient {
 	 */
 	async disconnect(): Promise<void> {
 		this.client = null;
-		this.calendar = null;
+		this.calendars = new Map();
 	}
 
 	/**
@@ -239,27 +311,24 @@ export class CalDAVClient {
 	}
 
 	/**
-	 * Fetch all tasks from CalDAV server
-	 * Implements T073: Retry logic with exponential backoff
-	 * @param completedTaskAgeThreshold Optional date threshold to exclude old completed tasks at server level
+	 * Fetch all tasks from a specific calendar
+	 * @param calendarUrl The exact URL of the calendar to fetch from
 	 * @returns Array of CalDAV tasks
 	 */
-	async fetchAllTasks(): Promise<CalDAVTask[]> {
-		if (!this.client || !this.calendar) {
+	async fetchAllTasks(calendarUrl: string): Promise<CalDAVTask[]> {
+		if (!this.client) {
 			throw new CalDAVError(
 				"Client not connected. Call connect() first.",
 			);
 		}
 
+		const calendar = this.getCalendar(calendarUrl);
+
 		return withRetry(async () => {
 			try {
-				Logger.debug("Fetching tasks from CalDAV server...");
+				Logger.debug(`Fetching tasks from calendar: ${calendarUrl}`);
 
-				// Filter for VTODO items (tasks) instead of default VEVENT (events).
-				// Age filtering of completed tasks is done client-side:
-				// a server-side prop-filter on LAST-MODIFIED silently drops tasks
-				// on servers that don't populate the property (it is optional per
-				// RFC 5545).
+				// Age filtering of completed tasks is done client-side.
 				const vtodoFilter: CalDAVFilter = {
 					"comp-filter": {
 						_attributes: { name: "VCALENDAR" },
@@ -269,32 +338,21 @@ export class CalDAVClient {
 					},
 				};
 
-				// Fetch calendar objects with VTODO filter
-				const calendarObjects = await this.client!.fetchCalendarObjects(
-					{
-						calendar: this.calendar!,
-						filters: vtodoFilter,
-					},
-				);
+				const calendarObjects = await this.client!.fetchCalendarObjects({
+					calendar,
+					filters: vtodoFilter,
+				});
 
 				Logger.debug(
-					`Fetched ${
-						calendarObjects?.length ?? 0
-					} calendar objects from server`,
+					`Fetched ${calendarObjects?.length ?? 0} calendar objects from ${calendarUrl}`,
 				);
 
-				// Check if we got any objects
 				if (!calendarObjects || calendarObjects.length === 0) {
-					Logger.debug(
-						"No VTODO objects found on server (calendar may be empty)",
-					);
 					return [];
 				}
 
-				// Filter for VTODO objects
 				const todoObjects = calendarObjects.filter((obj) => {
-					const hasVTODO =
-						obj.data && obj.data.includes("BEGIN:VTODO");
+					const hasVTODO = obj.data && obj.data.includes("BEGIN:VTODO");
 					if (!hasVTODO) {
 						Logger.warn(
 							`Object fetched with VTODO filter doesn't contain VTODO: ${obj.url}`,
@@ -303,7 +361,7 @@ export class CalDAVClient {
 					return hasVTODO;
 				});
 
-				Logger.debug(`Found ${todoObjects.length} VTODO objects`);
+				Logger.debug(`Found ${todoObjects.length} VTODO objects in ${calendarUrl}`);
 
 				return todoObjects.map((obj) => this.parseVTODOToTask(obj));
 			} catch (error) {
@@ -355,11 +413,12 @@ export class CalDAVClient {
 				);
 			}
 
-			// Check for auth errors
+			// Check for auth errors (including discovery-specific PROPFIND 401/403)
 			if (
 				message.includes("401") ||
 				message.includes("403") ||
-				message.includes("Unauthorized")
+				message.includes("Unauthorized") ||
+				message.includes("Forbidden")
 			) {
 				return new CalDAVAuthError(
 					`Authentication failed while trying to ${operation}`,
@@ -394,16 +453,18 @@ export class CalDAVClient {
 	 * @returns Created CalDAV task with UID and etag
 	 */
 	async createTask(
+		calendarUrl: string,
 		summary: string,
 		due: Date | null,
 		status: VTODOStatus,
 		description?: string,
 	): Promise<CalDAVTask> {
-		if (!this.client || !this.calendar) {
+		if (!this.client) {
 			throw new CalDAVError(
 				"Client not connected. Call connect() first.",
 			);
 		}
+		const calendar = this.getCalendar(calendarUrl);
 
 		const uid = crypto.randomUUID();
 		const timestamp =
@@ -440,7 +501,7 @@ END:VCALENDAR`;
 
 		try {
 			const result = await this.client.createCalendarObject({
-				calendar: this.calendar,
+				calendar,
 				filename: `${uid}.ics`,
 				iCalString: vtodoString,
 			});
@@ -481,7 +542,7 @@ END:VCALENDAR`;
 		etag: string,
 		href: string,
 	): Promise<CalDAVTask> {
-		if (!this.client || !this.calendar) {
+		if (!this.client) {
 			throw new CalDAVError(
 				"Client not connected. Call connect() first.",
 			);
@@ -612,8 +673,9 @@ END:VCALENDAR`;
 		status: VTODOStatus,
 		etag: string,
 		href: string,
+		calendarUrl?: string,
 	): Promise<CalDAVTask> {
-		if (!this.client || !this.calendar) {
+		if (!this.client) {
 			throw new CalDAVError(
 				"Client not connected. Call connect() first.",
 			);
@@ -621,7 +683,7 @@ END:VCALENDAR`;
 
 		try {
 			// T027: Fetch the existing raw VTODO data
-			const existingVTODO = await this.fetchTaskRawData(caldavUid);
+			const existingVTODO = await this.fetchTaskRawData(caldavUid, calendarUrl);
 
 			if (!existingVTODO) {
 				throw new CalDAVError(
@@ -724,7 +786,7 @@ END:VCALENDAR`;
 		etag: string,
 		href: string,
 	): Promise<void> {
-		if (!this.client || !this.calendar) {
+		if (!this.client) {
 			throw new CalDAVError(
 				"Client not connected. Call connect() first.",
 			);
@@ -748,44 +810,43 @@ END:VCALENDAR`;
 	}
 
 	/**
-	 * Fetch a single task by UID to get fresh metadata (especially etag)
-	 * This is useful after updates when the server doesn't return the new etag
+	 * Fetch a single task by UID to get fresh metadata (especially etag).
+	 * If calendarUrl is provided, searches only that calendar; otherwise searches all discovered calendars.
 	 * @param uid The CalDAV UID of the task
+	 * @param calendarUrl Optional calendar URL to restrict the search
 	 * @returns The task with fresh metadata, or null if not found
 	 */
-	async fetchTaskByUid(uid: string): Promise<CalDAVTask | null> {
-		if (!this.client || !this.calendar) {
+	async fetchTaskByUid(uid: string, calendarUrl?: string): Promise<CalDAVTask | null> {
+		if (!this.client) {
 			throw new CalDAVError(
 				"Client not connected. Call connect() first.",
 			);
 		}
 
+		const searchCalendars = calendarUrl
+			? [this.getCalendar(calendarUrl)]
+			: Array.from(this.calendars.values());
+
+		const vtodoFilter = {
+			"comp-filter": {
+				_attributes: { name: "VCALENDAR" },
+				"comp-filter": { _attributes: { name: "VTODO" } },
+			},
+		};
+
 		try {
-			// Fetch all tasks and find the one with matching UID
-			// This is not the most efficient but it's reliable
-			const calendarObjects = await this.client.fetchCalendarObjects({
-				calendar: this.calendar,
-				filters: {
-					"comp-filter": {
-						_attributes: { name: "VCALENDAR" },
-						"comp-filter": {
-							_attributes: { name: "VTODO" },
-						},
-					},
-				},
-			});
-
-			if (!calendarObjects) {
-				return null;
-			}
-
-			// Find the task with matching UID
-			for (const obj of calendarObjects) {
-				if (obj.data && obj.data.includes(`UID:${uid}`)) {
-					return this.parseVTODOToTask(obj);
+			for (const cal of searchCalendars) {
+				const calendarObjects = await this.client.fetchCalendarObjects({
+					calendar: cal,
+					filters: vtodoFilter,
+				});
+				if (!calendarObjects) continue;
+				for (const obj of calendarObjects) {
+					if (obj.data && obj.data.includes(`UID:${uid}`)) {
+						return this.parseVTODOToTask(obj);
+					}
 				}
 			}
-
 			return null;
 		} catch (error) {
 			Logger.warn(
@@ -798,44 +859,44 @@ END:VCALENDAR`;
 	}
 
 	/**
-	 * Fetch the raw iCalendar VTODO data for a task
-	 * T027 (002-sync-polish): Used for property preservation
+	 * Fetch the raw iCalendar VTODO data for a task.
+	 * If calendarUrl is provided, searches only that calendar; otherwise searches all discovered calendars.
 	 * @param uid The CalDAV UID of the task
+	 * @param calendarUrl Optional calendar URL to restrict the search
 	 * @returns The raw VTODO iCalendar string, or null if not found
 	 */
-	async fetchTaskRawData(uid: string): Promise<string | null> {
-		if (!this.client || !this.calendar) {
+	async fetchTaskRawData(uid: string, calendarUrl?: string): Promise<string | null> {
+		if (!this.client) {
 			throw new CalDAVError(
 				"Client not connected. Call connect() first.",
 			);
 		}
 
+		const searchCalendars = calendarUrl
+			? [this.getCalendar(calendarUrl)]
+			: Array.from(this.calendars.values());
+
+		const vtodoFilter = {
+			"comp-filter": {
+				_attributes: { name: "VCALENDAR" },
+				"comp-filter": { _attributes: { name: "VTODO" } },
+			},
+		};
+
 		try {
-			// Fetch all tasks and find the one with matching UID
-			const calendarObjects = await this.client.fetchCalendarObjects({
-				calendar: this.calendar,
-				filters: {
-					"comp-filter": {
-						_attributes: { name: "VCALENDAR" },
-						"comp-filter": {
-							_attributes: { name: "VTODO" },
-						},
-					},
-				},
-			});
-
-			if (!calendarObjects) {
-				return null;
-			}
-
-			// Find the task with matching UID and return raw data
-			for (const obj of calendarObjects) {
-				if (obj.data && obj.data.includes(`UID:${uid}`)) {
-					Logger.debug(`Fetched raw VTODO data for UID ${uid}`);
-					return obj.data;
+			for (const cal of searchCalendars) {
+				const calendarObjects = await this.client.fetchCalendarObjects({
+					calendar: cal,
+					filters: vtodoFilter,
+				});
+				if (!calendarObjects) continue;
+				for (const obj of calendarObjects) {
+					if (obj.data && obj.data.includes(`UID:${uid}`)) {
+						Logger.debug(`Fetched raw VTODO data for UID ${uid} from ${cal.url}`);
+						return obj.data;
+					}
 				}
 			}
-
 			Logger.debug(`Task with UID ${uid} not found on server`);
 			return null;
 		} catch (error) {
@@ -845,6 +906,56 @@ END:VCALENDAR`;
 				}`,
 			);
 			return null;
+		}
+	}
+
+	/**
+	 * Copy a VTODO to a different calendar (step 1 of move, per design D7).
+	 * Creates the VTODO at the destination with the same UID, returns the new task metadata.
+	 * @param sourceHref Full URL of the source VTODO
+	 * @param sourceEtag ETag of the source VTODO
+	 * @param destinationCalendarUrl URL of the destination calendar
+	 */
+	async copyTaskToCalendar(
+		sourceHref: string,
+		sourceEtag: string,
+		destinationCalendarUrl: string,
+	): Promise<CalDAVTask> {
+		if (!this.client) {
+			throw new CalDAVError("Client not connected. Call connect() first.");
+		}
+
+		const destCalendar = this.getCalendar(destinationCalendarUrl);
+
+		// Fetch raw data from source
+		const uid = sourceHref.split("/").pop()?.replace(".ics", "") ?? "";
+		const rawData = await this.fetchTaskRawData(uid);
+		if (!rawData) {
+			throw new CalDAVError(`Cannot copy task: source VTODO not found at ${sourceHref}`);
+		}
+
+		// Extract UID from raw data
+		const uidMatch = rawData.match(/UID:([^\r\n]+)/);
+		const taskUid = uidMatch?.[1] ?? uid;
+		const filename = `${taskUid}.ics`;
+
+		try {
+			const result = await this.client.createCalendarObject({
+				calendar: destCalendar,
+				filename,
+				iCalString: rawData,
+			});
+
+			return this.parseVTODOToTask({
+				url: result.url,
+				data: rawData,
+				etag: result.etag ?? sourceEtag,
+			});
+		} catch (error) {
+			if (error instanceof Error) {
+				throw new CalDAVError(`Failed to copy task to ${destinationCalendarUrl}: ${error.message}`);
+			}
+			throw error;
 		}
 	}
 
