@@ -414,10 +414,7 @@ export class SyncEngine {
 		const caldavTask = caldavTasks.get(mapping.caldavUid);
 
 		if (!caldavTask) {
-			Logger.warn(`CalDAV task not found for UID ${mapping.caldavUid} — removing stale mapping and re-creating on CalDAV`);
-			removeMapping(task.blockId);
-			await this.handleUntrackedTask(task);
-			stats.successCount++;
+			Logger.warn(`CalDAV task not found for UID ${mapping.caldavUid} — skipping (task already has block ID ${task.blockId})`);
 			return;
 		}
 
