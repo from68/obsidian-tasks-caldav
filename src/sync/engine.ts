@@ -62,6 +62,8 @@ export class SyncEngine {
 	 * Enables batched persistence instead of saving after every task operation
 	 */
 	private dirtyMappings = false;
+	private lastMissingUidNoticeShownAt = 0;
+	private readonly MISSING_UID_NOTICE_COOLDOWN_MS = 60 * 60 * 1000;
 
 	constructor(
 		app: App,
@@ -291,12 +293,13 @@ export class SyncEngine {
 					removeMapping(blockId);
 					continue;
 				}
-				if (!missingUidNoticeShown) {
+				if (!missingUidNoticeShown && Date.now() - this.lastMissingUidNoticeShownAt > this.MISSING_UID_NOTICE_COOLDOWN_MS) {
 					new Notice(
 						'Some synced tasks were not found in any discovered calendar. ' +
 						'Try clicking "Discover calendars" in settings to refresh the calendar list.',
 						8000,
 					);
+					this.lastMissingUidNoticeShownAt = Date.now();
 					missingUidNoticeShown = true;
 				}
 				Logger.warn(`UID ${mapping.caldavUid} not found in any discovered calendar — mapping preserved`);
@@ -767,8 +770,9 @@ export class SyncEngine {
 		// Convert task to expected VTODO format
 		const expected = taskToVTODO(task);
 
-		// Compare description
-		if (expected.summary !== caldavTask.summary) {
+		// Compare description only when CalDAV descriptions are authoritative;
+		// when syncDescriptionFromCalDAV is false the divergence is intentional.
+		if (this.config.syncDescriptionFromCalDAV && expected.summary !== caldavTask.summary) {
 			return true;
 		}
 
@@ -963,9 +967,11 @@ export class SyncEngine {
 			updatedData.status
 		);
 
-		// T059: Update sync mapping timestamps after successful update
+		// T059: Update sync mapping timestamps after successful update.
+		// Hash reflects what was actually written, not the stale pre-update task object.
+		const writtenSnapshot = { ...task, description: descriptionToApply, dueDate: updatedData.dueDate ?? task.dueDate, status: updatedData.status };
 		mapping.lastSyncTimestamp = new Date();
-		mapping.lastKnownContentHash = hashTaskContent(task);
+		mapping.lastKnownContentHash = hashTaskContent(writtenSnapshot);
 		mapping.lastKnownObsidianModified = new Date();
 		mapping.lastKnownCalDAVModified = caldavTask.lastModified;
 		mapping.caldavEtag = caldavTask.etag;
