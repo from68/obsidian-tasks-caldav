@@ -26,7 +26,7 @@ import {
 	hasConflict,
 } from "./conflictResolver";
 import { Logger } from "./logger";
-import { buildObsidianURI, buildDescriptionWithURI } from "../obsidian/uriBuilder";
+import { buildAdvancedURI, buildDescriptionWithURI } from "../obsidian/uriBuilder";
 import { processDescription } from "./hyperlinkProcessor";
 
 /**
@@ -708,7 +708,7 @@ export class SyncEngine {
 				Logger.warn('Skipping URI generation: task missing block ID');
 			} else {
 				// Generate URI and format DESCRIPTION (T016)
-				const uri = buildObsidianURI(vaultName, task.filePath, task.blockId);
+				const uri = buildAdvancedURI(vaultName, task.blockId);
 				description = buildDescriptionWithURI(uri, processed.extractedLinksBlock || undefined);
 			}
 		} catch (error) {

@@ -47,3 +47,4 @@ coverage/
 # OS
 .DS_Store
 Thumbs.db
+.claude/settings.local.json
