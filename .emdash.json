@@ -11,5 +11,9 @@
     "setup": "",
     "run": "",
     "teardown": ""
+  },
+  "defaultBranch": {
+    "name": "main",
+    "remote": true
   }
 }
